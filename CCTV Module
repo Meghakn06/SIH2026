@@ -1,0 +1,1257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Government Inspection & CCTV System</title>
+
+<style>
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: Arial, sans-serif;
+}
+
+body {
+    background: #f4f6f9;
+    color: #222;
+}
+
+/* ---------------- LOGIN ---------------- */
+
+#loginPage {
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: linear-gradient(135deg, #173b6c, #2563a6);
+}
+
+.login-box {
+    background: white;
+    width: 380px;
+    padding: 35px;
+    border-radius: 15px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+}
+
+.login-box h1 {
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.login-box p {
+    text-align: center;
+    color: #666;
+    margin-bottom: 25px;
+}
+
+.login-box input {
+    width: 100%;
+    padding: 13px;
+    margin: 8px 0;
+    border: 1px solid #ccc;
+    border-radius: 7px;
+}
+
+button {
+    border: none;
+    padding: 11px 18px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.login-btn {
+    width: 100%;
+    margin-top: 15px;
+    background: #2563a6;
+    color: white;
+}
+
+.login-btn:hover {
+    background: #173b6c;
+}
+
+#error {
+    color: red;
+    text-align: center;
+    margin-top: 10px;
+}
+
+/* ---------------- DASHBOARD ---------------- */
+
+#dashboard {
+    display: none;
+}
+
+header {
+    background: #173b6c;
+    color: white;
+    padding: 18px 30px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+header h2 {
+    font-size: 22px;
+}
+
+.logout {
+    background: #dc3545;
+    color: white;
+}
+
+.container {
+    padding: 25px;
+    max-width: 1300px;
+    margin: auto;
+}
+
+.welcome {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    margin-bottom: 25px;
+}
+
+.welcome h2 {
+    margin-bottom: 8px;
+}
+
+/* ---------------- NAVIGATION ---------------- */
+
+.tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.tab-btn {
+    background: white;
+    border: 1px solid #ddd;
+}
+
+.tab-btn.active {
+    background: #2563a6;
+    color: white;
+}
+
+.section {
+    display: none;
+}
+
+.section.active {
+    display: block;
+}
+
+/* ---------------- CARDS ---------------- */
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 18px;
+}
+
+.card {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+}
+
+.card h3 {
+    margin-bottom: 10px;
+}
+
+.card p {
+    margin: 7px 0;
+    color: #555;
+}
+
+.online {
+    color: green;
+    font-weight: bold;
+}
+
+.offline {
+    color: red;
+    font-weight: bold;
+}
+
+/* ---------------- CCTV ---------------- */
+
+.cctv-layout {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 20px;
+}
+
+.video-container {
+    background: #111;
+    min-height: 430px;
+    border-radius: 12px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+}
+
+.video-container video {
+    width: 100%;
+    height: 430px;
+    object-fit: cover;
+}
+
+.video-placeholder {
+    color: white;
+    text-align: center;
+}
+
+.camera-list {
+    background: white;
+    padding: 18px;
+    border-radius: 12px;
+}
+
+.camera-item {
+    padding: 13px;
+    border-bottom: 1px solid #eee;
+    cursor: pointer;
+}
+
+.camera-item:hover {
+    background: #f0f4f8;
+}
+
+.camera-item:last-child {
+    border-bottom: none;
+}
+
+/* ---------------- REPORT ---------------- */
+
+.report {
+    background: white;
+    padding: 30px;
+    border-radius: 12px;
+    line-height: 1.8;
+}
+
+.report h2 {
+    color: #173b6c;
+    margin-bottom: 15px;
+}
+
+.report-section {
+    margin-top: 20px;
+    border-top: 1px solid #ddd;
+    padding-top: 15px;
+}
+
+.check {
+    margin: 7px 0;
+}
+
+.pass {
+    color: green;
+}
+
+.fail {
+    color: red;
+}
+
+.evidence {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+.evidence img {
+    width: 180px;
+    height: 120px;
+    object-fit: cover;
+    border-radius: 8px;
+}
+
+/* ---------------- DOCUMENTATION ---------------- */
+
+.documentation {
+    background: white;
+    padding: 25px;
+    border-radius: 12px;
+}
+
+textarea {
+    width: 100%;
+    height: 120px;
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+}
+
+.generate {
+    margin-top: 15px;
+    background: #2563a6;
+    color: white;
+}
+
+.generated-report {
+    margin-top: 20px;
+    padding: 20px;
+    background: #f7f9fb;
+    border-radius: 10px;
+    display: none;
+}
+
+/* ---------------- RESPONSIVE ---------------- */
+
+@media(max-width: 800px) {
+
+    .cctv-layout {
+        grid-template-columns: 1fr;
+    }
+
+    header {
+        padding: 15px;
+    }
+
+    .container {
+        padding: 15px;
+    }
+}
+</style>
+</head>
+
+
+<body>
+
+
+<!-- =====================================================
+                    LOGIN PAGE
+===================================================== -->
+
+<div id="loginPage">
+
+    <div class="login-box">
+
+        <h1>🏛️ DoSJE</h1>
+
+        <p>Government Inspection System</p>
+
+        <input
+            type="text"
+            id="username"
+            placeholder="Officer Username"
+        >
+
+        <input
+            type="password"
+            id="password"
+            placeholder="Password"
+        >
+
+        <button
+            class="login-btn"
+            onclick="login()"
+        >
+            Login
+        </button>
+
+        <div id="error"></div>
+
+    </div>
+
+</div>
+
+
+<!-- =====================================================
+                    DASHBOARD
+===================================================== -->
+
+<div id="dashboard">
+
+<header>
+
+    <h2>🏛️ Government Inspection Dashboard</h2>
+
+    <button
+        class="logout"
+        onclick="logout()"
+    >
+        Logout
+    </button>
+
+</header>
+
+
+<div class="container">
+
+
+<!-- WELCOME -->
+
+<div class="welcome">
+
+    <h2>Welcome, Authorized Officer 👮</h2>
+
+    <p>
+        Monitor institutes, view CCTV cameras and inspect
+        submitted inspection reports.
+    </p>
+
+</div>
+
+
+<!-- =====================================================
+                    NAVIGATION
+===================================================== -->
+
+<div class="tabs">
+
+    <button
+        class="tab-btn active"
+        onclick="showSection('institutes', this)"
+    >
+        🏢 Institutes
+    </button>
+
+    <button
+        class="tab-btn"
+        onclick="showSection('cctv', this)"
+    >
+        📹 CCTV Monitoring
+    </button>
+
+    <button
+        class="tab-btn"
+        onclick="showSection('reports', this)"
+    >
+        📋 Inspection Reports
+    </button>
+
+    <button
+        class="tab-btn"
+        onclick="showSection('documentation', this)"
+    >
+        📚 Documentation
+    </button>
+
+</div>
+
+
+<!-- =====================================================
+                    STEP 1
+                 CCTV UI / INSTITUTES
+===================================================== -->
+
+<div
+    id="institutes"
+    class="section active"
+>
+
+<h2>🏢 Registered Institutes / NGOs</h2>
+
+<br>
+
+<div class="cards">
+
+
+<div class="card">
+
+<h3>ABC Child Welfare NGO</h3>
+
+<p>
+📍 Bengaluru
+</p>
+
+<p>
+Cameras: 3
+</p>
+
+<p class="online">
+🟢 System Online
+</p>
+
+<button
+    onclick="openCCTV('ABC Child Welfare NGO')"
+>
+    View CCTV
+</button>
+
+</div>
+
+
+<div class="card">
+
+<h3>XYZ Welfare Institute</h3>
+
+<p>
+📍 Mysuru
+</p>
+
+<p>
+Cameras: 2
+</p>
+
+<p class="online">
+🟢 System Online
+</p>
+
+<button
+    onclick="openCCTV('XYZ Welfare Institute')"
+>
+    View CCTV
+</button>
+
+</div>
+
+
+<div class="card">
+
+<h3>DEF Rehabilitation Centre</h3>
+
+<p>
+📍 Bengaluru
+</p>
+
+<p>
+Cameras: 3
+</p>
+
+<p class="offline">
+🔴 Some Cameras Offline
+</p>
+
+<button
+    onclick="openCCTV('DEF Rehabilitation Centre')"
+>
+    View CCTV
+</button>
+
+</div>
+
+
+</div>
+
+</div>
+
+
+<!-- =====================================================
+                    STEP 2 + 3
+               CAMERA DATA + ACCESS
+===================================================== -->
+
+<div
+    id="cctv"
+    class="section"
+>
+
+<h2>📹 CCTV Remote Monitoring</h2>
+
+<br>
+
+<div class="cctv-layout">
+
+
+<!-- VIDEO -->
+
+<div>
+
+<div class="video-container">
+
+    <div
+        id="videoPlaceholder"
+        class="video-placeholder"
+    >
+
+        <h2>📹 CCTV Feed</h2>
+
+        <p>
+            Select a camera from the right
+        </p>
+
+    </div>
+
+    <!-- Demo video -->
+    <video
+        id="cctvVideo"
+        controls
+        autoplay
+        muted
+        loop
+        style="display:none;"
+    >
+
+        <source
+            src="https://www.w3schools.com/html/mov_bbb.mp4"
+            type="video/mp4"
+        >
+
+        Your browser does not support video.
+
+    </video>
+
+</div>
+
+<br>
+
+<div class="card">
+
+<h3 id="cameraTitle">
+No Camera Selected
+</h3>
+
+<p id="cameraStatus">
+Status: —
+</p>
+
+<p id="cameraLocation">
+Location: —
+</p>
+
+<p id="instituteName">
+Institute: —
+</p>
+
+</div>
+
+</div>
+
+
+<!-- CAMERA LIST -->
+
+<div class="camera-list">
+
+<h3>Available Cameras</h3>
+
+<br>
+
+<div
+    class="camera-item"
+    onclick="selectCamera(
+        'Main Gate Camera',
+        'ABC Child Welfare NGO',
+        'Main Entrance',
+        true
+    )"
+>
+
+📹 <b>Main Gate</b>
+
+<br>
+
+<span class="online">
+🟢 Online
+</span>
+
+</div>
+
+
+<div
+    class="camera-item"
+    onclick="selectCamera(
+        'Reception Camera',
+        'ABC Child Welfare NGO',
+        'Reception',
+        true
+    )"
+>
+
+📹 <b>Reception</b>
+
+<br>
+
+<span class="online">
+🟢 Online
+</span>
+
+</div>
+
+
+<div
+    class="camera-item"
+    onclick="selectCamera(
+        'Classroom Camera',
+        'ABC Child Welfare NGO',
+        'Classroom',
+        false
+    )"
+>
+
+📹 <b>Classroom</b>
+
+<br>
+
+<span class="offline">
+🔴 Offline
+</span>
+
+</div>
+
+
+<div
+    class="camera-item"
+    onclick="selectCamera(
+        'Office Camera',
+        'XYZ Welfare Institute',
+        'Office',
+        true
+    )"
+>
+
+📹 <b>Office</b>
+
+<br>
+
+<span class="online">
+🟢 Online
+</span>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+
+<!-- =====================================================
+                    STEP 4
+                  INSPECTION REPORT
+===================================================== -->
+
+<div
+    id="reports"
+    class="section"
+>
+
+<h2>📋 Inspection Report</h2>
+
+<br>
+
+<div class="report">
+
+<h2>
+Inspection Report #1042
+</h2>
+
+<p>
+<b>Institute:</b>
+ABC Child Welfare NGO
+</p>
+
+<p>
+<b>Institute ID:</b>
+NGO-1024
+</p>
+
+<p>
+<b>Inspector:</b>
+Government Inspector
+</p>
+
+<p>
+<b>Inspection Date:</b>
+07 September 2026
+</p>
+
+
+<div class="report-section">
+
+<h3>📋 Inspection Checklist</h3>
+
+<div class="check pass">
+☑ Promised services are being provided
+</div>
+
+<div class="check pass">
+☑ Facilities are maintained properly
+</div>
+
+<div class="check fail">
+☐ Resources are not being fully utilized
+</div>
+
+<div class="check pass">
+☑ Government rules are being followed
+</div>
+
+</div>
+
+
+<div class="report-section">
+
+<h3>📍 Location Verification</h3>
+
+<p>
+Latitude:
+12.9716
+</p>
+
+<p>
+Longitude:
+77.5946
+</p>
+
+<p class="pass">
+🟢 Location Verified
+</p>
+
+</div>
+
+
+<div class="report-section">
+
+<h3>📸 Evidence</h3>
+
+<div class="evidence">
+
+<img
+src="https://images.unsplash.com/photo-1497366754035-f200968a6e72"
+alt="Evidence"
+/>
+
+<img
+src="https://images.unsplash.com/photo-1524758631624-e2822e304c36"
+alt="Evidence"
+/>
+
+</div>
+
+</div>
+
+
+<div class="report-section">
+
+<h3>📝 Inspector Remarks</h3>
+
+<p>
+One facility requires maintenance.
+Resource utilization should be improved.
+Further review is recommended.
+</p>
+
+</div>
+
+
+<div class="report-section">
+
+<h3>Final Status</h3>
+
+<h3 class="fail">
+⚠️ NEEDS ATTENTION
+</h3>
+
+</div>
+
+<br>
+
+<button onclick="printReport()">
+🖨️ Print / Save Report
+</button>
+
+</div>
+
+</div>
+
+
+<!-- =====================================================
+                    STEP 5
+                  DOCUMENTATION
+===================================================== -->
+
+<div
+    id="documentation"
+    class="section"
+>
+
+<h2>📚 Inspection Documentation</h2>
+
+<br>
+
+<div class="documentation">
+
+<h3>Generate Inspection Documentation</h3>
+
+<br>
+
+<label>
+Institute Name
+</label>
+
+<input
+    type="text"
+    id="docInstitute"
+    value="ABC Child Welfare NGO"
+    style="width:100%;padding:12px;margin:8px 0 15px;"
+>
+
+
+<label>
+Inspector Name
+</label>
+
+<input
+    type="text"
+    id="docInspector"
+    value="Government Inspector"
+    style="width:100%;padding:12px;margin:8px 0 15px;"
+>
+
+
+<label>
+Inspection Remarks
+</label>
+
+<textarea
+    id="docRemarks"
+    placeholder="Enter inspection remarks..."
+>
+Facility maintenance is required. Resources should be utilized properly.
+</textarea>
+
+
+<button
+    class="generate"
+    onclick="generateReport()"
+>
+📄 Generate Report
+</button>
+
+
+<div
+    id="generatedReport"
+    class="generated-report"
+>
+
+<h2>OFFICIAL INSPECTION DOCUMENT</h2>
+
+<hr>
+
+<br>
+
+<p>
+<b>Institute:</b>
+<span id="generatedInstitute"></span>
+</p>
+
+<p>
+<b>Inspector:</b>
+<span id="generatedInspector"></span>
+</p>
+
+<p>
+<b>Date:</b>
+<span id="generatedDate"></span>
+</p>
+
+<br>
+
+<h3>Inspection Summary</h3>
+
+<p>
+Services: ✔ Verified
+</p>
+
+<p>
+Facilities: ✔ Verified
+</p>
+
+<p>
+Location: ✔ GPS Verified
+</p>
+
+<p>
+Evidence: ✔ Submitted
+</p>
+
+<br>
+
+<h3>Inspector Remarks</h3>
+
+<p id="generatedRemarks"></p>
+
+<br>
+
+<h3>Documentation Status</h3>
+
+<p class="pass">
+✔ Successfully documented
+</p>
+
+<br>
+
+<button onclick="printDocumentation()">
+🖨️ Print Documentation
+</button>
+
+</div>
+
+</div>
+
+</div>
+
+
+</div>
+
+</div>
+
+
+<script>
+
+/* =====================================================
+                  LOGIN / ACCESS CONTROL
+===================================================== */
+
+function login() {
+
+    const username =
+        document.getElementById("username").value;
+
+    const password =
+        document.getElementById("password").value;
+
+    /*
+       DEMO LOGIN
+
+       Username: officer
+       Password: 1234
+
+       In a real application,
+       authentication must happen
+       on the backend.
+    */
+
+    if (
+        username === "officer" &&
+        password === "1234"
+    ) {
+
+        document.getElementById("loginPage")
+            .style.display = "none";
+
+        document.getElementById("dashboard")
+            .style.display = "block";
+
+    }
+
+    else {
+
+        document.getElementById("error")
+            .innerText =
+            "Invalid officer credentials.";
+
+    }
+
+}
+
+
+/* =====================================================
+                       LOGOUT
+===================================================== */
+
+function logout() {
+
+    document.getElementById("dashboard")
+        .style.display = "none";
+
+    document.getElementById("loginPage")
+        .style.display = "flex";
+
+}
+
+
+/* =====================================================
+                 SECTION NAVIGATION
+===================================================== */
+
+function showSection(sectionId, button) {
+
+    const sections =
+        document.querySelectorAll(".section");
+
+    sections.forEach(section => {
+
+        section.classList.remove("active");
+
+    });
+
+
+    document
+        .getElementById(sectionId)
+        .classList.add("active");
+
+
+    const buttons =
+        document.querySelectorAll(".tab-btn");
+
+    buttons.forEach(btn => {
+
+        btn.classList.remove("active");
+
+    });
+
+
+    button.classList.add("active");
+
+}
+
+
+/* =====================================================
+                    CCTV ACCESS
+===================================================== */
+
+function openCCTV(institute) {
+
+    const cctvButton =
+        document.querySelectorAll(".tab-btn")[1];
+
+    showSection("cctv", cctvButton);
+
+    document.getElementById("instituteName")
+        .innerText =
+        "Institute: " + institute;
+
+}
+
+
+/* =====================================================
+                  CAMERA SELECTION
+===================================================== */
+
+function selectCamera(
+    camera,
+    institute,
+    location,
+    online
+) {
+
+    document.getElementById("cameraTitle")
+        .innerText =
+        "📹 " + camera;
+
+    document.getElementById("cameraLocation")
+        .innerText =
+        "Location: " + location;
+
+    document.getElementById("instituteName")
+        .innerText =
+        "Institute: " + institute;
+
+
+    if (online) {
+
+        document.getElementById("cameraStatus")
+            .innerHTML =
+            "Status: <span class='online'>🟢 Online</span>";
+
+
+        /*
+           DEMO CCTV VIDEO
+
+           In a real system this source would
+           be replaced with the authorized
+           CCTV streaming infrastructure.
+        */
+
+        document.getElementById("videoPlaceholder")
+            .style.display = "none";
+
+        document.getElementById("cctvVideo")
+            .style.display = "block";
+
+    }
+
+    else {
+
+        document.getElementById("cameraStatus")
+            .innerHTML =
+            "Status: <span class='offline'>🔴 Offline</span>";
+
+        document.getElementById("videoPlaceholder")
+            .style.display = "block";
+
+        document.getElementById("videoPlaceholder")
+            .innerHTML =
+
+            "<h2>🔴 Camera Offline</h2>" +
+            "<p>This CCTV camera is currently unavailable.</p>";
+
+        document.getElementById("cctvVideo")
+            .style.display = "none";
+
+    }
+
+}
+
+
+/* =====================================================
+                REPORT DOCUMENTATION
+===================================================== */
+
+function generateReport() {
+
+    const institute =
+        document.getElementById("docInstitute").value;
+
+    const inspector =
+        document.getElementById("docInspector").value;
+
+    const remarks =
+        document.getElementById("docRemarks").value;
+
+
+    document.getElementById("generatedInstitute")
+        .innerText = institute;
+
+    document.getElementById("generatedInspector")
+        .innerText = inspector;
+
+    document.getElementById("generatedRemarks")
+        .innerText = remarks;
+
+
+    const today =
+        new Date().toLocaleDateString();
+
+    document.getElementById("generatedDate")
+        .innerText = today;
+
+
+    document.getElementById("generatedReport")
+        .style.display = "block";
+
+}
+
+
+/* =====================================================
+                  PRINT INSPECTION REPORT
+===================================================== */
+
+function printReport() {
+
+    window.print();
+
+}
+
+
+/* =====================================================
+                PRINT DOCUMENTATION
+===================================================== */
+
+function printDocumentation() {
+
+    window.print();
+
+}
+
+</script>
+
+</body>
+</html>
