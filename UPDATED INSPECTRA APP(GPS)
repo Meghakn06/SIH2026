@@ -1,0 +1,2067 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:onesignal_flutter/onesignal_flutter.dart';
+
+/// ===============================================================
+/// INSPECTRA - INSPECTOR APP
+/// ===============================================================
+/// Team-owned modules intentionally NOT implemented here:
+/// 1. Government/Admin login and dashboard.
+/// 2. Actual photo/file upload and storage.
+///
+/// This file contains the inspector-side inspection logic:
+/// - Inspector login/session
+/// - Assigned inspections
+/// - Automatic inspector allocation
+/// - GPS verification with 100 m geofence
+/// - GPS accuracy validation
+/// - Compliance checklist
+/// - Evidence status interface
+/// - AI inspection verification
+/// - AI final conclusion
+/// - Inspection validation/submission
+/// - OneSignal initialization
+/// - Notification event hooks
+///
+/// IMPORTANT:
+/// Change the backend URL and OneSignal App ID before production use.
+/// A mobile app must NOT contain a OneSignal REST API key.
+/// Server-triggered push notifications should be sent by your backend.
+/// ===============================================================
+
+class AppConfig {
+  // Android emulator -> host machine.
+  // For a physical phone, replace 10.0.2.2 with your computer's LAN IP.
+  static const String apiBaseUrl = 'http://10.0.2.2:8000';
+
+  // Replace with your real OneSignal App ID.
+  // Do not put a OneSignal REST API key in this Flutter app.
+  static const String oneSignalAppId = '7a30b42a-b8c8-4169-af3a-e06149588c1a';
+
+  static const double siteRadiusMeters = 100.0;
+  static const double maxGpsAccuracyMeters = 50.0;
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    debugPrint('Firebase initialization skipped or failed: $e');
+  }
+
+  await NotificationService.initialize();
+
+  runApp(const InspectraApp());
+}
+
+// ===============================================================
+// ONESIGNAL / NOTIFICATION SERVICE
+// ===============================================================
+
+class NotificationService {
+  static bool _initialized = false;
+
+  static Future<void> initialize() async {
+    if (AppConfig.oneSignalAppId == 'YOUR_ONESIGNAL_APP_ID') {
+      debugPrint(
+        'OneSignal is not initialized: replace AppConfig.oneSignalAppId.',
+      );
+      return;
+    }
+
+    try {
+      OneSignal.initialize(AppConfig.oneSignalAppId);
+      await OneSignal.Notifications.requestPermission(true);
+      _initialized = true;
+      debugPrint('OneSignal initialized.');
+    } catch (e) {
+      debugPrint('OneSignal initialization failed: $e');
+    }
+  }
+
+  static bool get isInitialized => _initialized;
+
+  /// Registers the logged-in inspector as the OneSignal external user.
+  /// This does not send a notification; it identifies the device/user.
+  static Future<void> identifyInspector(String inspectorId) async {
+    if (!_initialized || inspectorId.trim().isEmpty) return;
+
+    try {
+      await OneSignal.login(inspectorId);
+    } catch (e) {
+      debugPrint('OneSignal inspector identification failed: $e');
+    }
+  }
+
+  /// Local app-side hook. Actual remote push delivery should be triggered
+  /// securely by the backend using OneSignal's server API.
+  static Future<void> sendEventToBackend({
+    required String event,
+    required String authToken,
+    required String inspectorId,
+    String? inspectionId,
+    String? message,
+  }) async {
+    if (authToken.isEmpty || authToken.startsWith('mock_')) {
+      debugPrint(
+        'Notification event [$event] not sent remotely because there is '
+        'no real backend session.',
+      );
+      return;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('${AppConfig.apiBaseUrl}/notifications/trigger'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $authToken',
+        },
+        body: jsonEncode({
+          'event': event,
+          'inspectorId': inspectorId,
+          'inspectionId': inspectionId,
+          'message': message,
+        }),
+      );
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        debugPrint(
+          'Notification event failed: ${response.statusCode} ${response.body}',
+        );
+      }
+    } catch (e) {
+      debugPrint('Notification event backend unavailable: $e');
+    }
+  }
+}
+
+// ===============================================================
+// MODELS
+// ===============================================================
+
+class InspectorInfo {
+  final String id;
+  final String name;
+  final bool available;
+  final int workload;
+  final double? latitude;
+  final double? longitude;
+  final List<String> expertise;
+  final double? distanceToSite;
+
+  InspectorInfo({
+    required this.id,
+    required this.name,
+    required this.available,
+    required this.workload,
+    this.latitude,
+    this.longitude,
+    this.expertise = const [],
+    this.distanceToSite,
+  });
+
+  factory InspectorInfo.fromJson(Map<String, dynamic> json) {
+    final rawExpertise = json['expertise'] ?? json['skills'] ?? [];
+    final expertise = rawExpertise is List
+        ? rawExpertise.map((e) => e.toString().toLowerCase()).toList()
+        : <String>[];
+
+    double? number(dynamic value) {
+      if (value == null) return null;
+      return double.tryParse(value.toString());
+    }
+
+    return InspectorInfo(
+      id: (json['id'] ?? json['inspectorId'] ?? '').toString(),
+      name: (json['name'] ?? json['inspectorName'] ?? 'Inspector').toString(),
+      available: json['available'] ?? json['isAvailable'] ?? true,
+      workload: int.tryParse(
+            (json['workload'] ?? json['currentWorkload'] ?? 0).toString(),
+          ) ??
+          0,
+      latitude: number(json['latitude'] ?? json['inspectorLatitude']),
+      longitude: number(json['longitude'] ?? json['inspectorLongitude']),
+      expertise: expertise,
+    );
+  }
+
+  InspectorInfo copyWith({double? distanceToSite}) {
+    return InspectorInfo(
+      id: id,
+      name: name,
+      available: available,
+      workload: workload,
+      latitude: latitude,
+      longitude: longitude,
+      expertise: expertise,
+      distanceToSite: distanceToSite ?? this.distanceToSite,
+    );
+  }
+}
+
+class AiInspectionResult {
+  final String inspectionVerification;
+  final String finalStatus;
+  final String summary;
+  final String reason;
+  final String recommendedAction;
+
+  const AiInspectionResult({
+    required this.inspectionVerification,
+    required this.finalStatus,
+    required this.summary,
+    required this.reason,
+    required this.recommendedAction,
+  });
+
+  factory AiInspectionResult.fromJson(Map<String, dynamic> json) {
+    return AiInspectionResult(
+      inspectionVerification:
+          (json['inspectionVerification'] ??
+                  json['verification'] ??
+                  json['inspectionStatus'] ??
+                  'REQUIRES REVIEW')
+              .toString(),
+      finalStatus:
+          (json['finalStatus'] ?? json['status'] ?? 'REQUIRES REVIEW').toString(),
+      summary: (json['summary'] ?? json['conclusion'] ?? '').toString(),
+      reason: (json['reason'] ?? '').toString(),
+      recommendedAction: (json['recommendedAction'] ??
+              json['recommendation'] ??
+              '')
+          .toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'inspectionVerification': inspectionVerification,
+      'finalStatus': finalStatus,
+      'summary': summary,
+      'reason': reason,
+      'recommendedAction': recommendedAction,
+    };
+  }
+}
+
+// ===============================================================
+// WORK ALLOCATION
+// ===============================================================
+
+class WorkAllocationService {
+  static Future<InspectorInfo?> selectSuitableInspector({
+    required Map<String, dynamic> inspection,
+    required String authToken,
+  }) async {
+    try {
+      final response = await http.get(
+        Uri.parse('${AppConfig.apiBaseUrl}/inspectors'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $authToken',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        final list = decoded is List
+            ? decoded
+            : (decoded['inspectors'] ?? <dynamic>[]) as List;
+
+        final inspectors = list
+            .map(
+              (e) => InspectorInfo.fromJson(
+                Map<String, dynamic>.from(e as Map),
+              ),
+            )
+            .where((i) => i.available)
+            .toList();
+
+        final selected = _selectByScore(
+          inspectors: inspectors,
+          inspection: inspection,
+        );
+
+        if (selected != null) return selected;
+      }
+    } catch (e) {
+      debugPrint('Inspector API unavailable: $e');
+    }
+
+    // Demo fallback. This is rule-based, not real AI.
+    final demoInspectors = <InspectorInfo>[
+      InspectorInfo(
+        id: 'INS-101',
+        name: 'Ananya',
+        available: true,
+        workload: 2,
+        latitude: 12.9716,
+        longitude: 77.5946,
+        expertise: ['safety', 'electrical'],
+      ),
+      InspectorInfo(
+        id: 'INS-102',
+        name: 'Rahul',
+        available: true,
+        workload: 4,
+        latitude: 12.9352,
+        longitude: 77.6245,
+        expertise: ['fire', 'safety'],
+      ),
+      InspectorInfo(
+        id: 'INS-103',
+        name: 'Megha',
+        available: true,
+        workload: 1,
+        latitude: 12.9850,
+        longitude: 77.6200,
+        expertise: ['electrical', 'industrial'],
+      ),
+    ];
+
+    return _selectByScore(
+      inspectors: demoInspectors,
+      inspection: inspection,
+    );
+  }
+
+  static InspectorInfo? _selectByScore({
+    required List<InspectorInfo> inspectors,
+    required Map<String, dynamic> inspection,
+  }) {
+    if (inspectors.isEmpty) return null;
+
+    final siteLat = _toDouble(
+      inspection['latitude'] ?? inspection['siteLatitude'],
+    );
+    final siteLng = _toDouble(
+      inspection['longitude'] ?? inspection['siteLongitude'],
+    );
+
+    final priority =
+        (inspection['priority'] ?? inspection['concern'] ?? 'normal')
+            .toString()
+            .toLowerCase();
+
+    final type = (inspection['inspectionType'] ??
+            inspection['type'] ??
+            inspection['concern'] ??
+            '')
+        .toString()
+        .toLowerCase();
+
+    final scored = <MapEntry<InspectorInfo, double>>[];
+
+    for (final inspector in inspectors) {
+      double score = 0;
+
+      // Lower workload is better.
+      score += math.max(0, 30 - inspector.workload * 5);
+
+      // Availability is already filtered, but keep a strong preference.
+      if (inspector.available) score += 25;
+
+      // Priority: for urgent/high-priority jobs, distance matters more.
+      final distance = _distanceIfPossible(
+        inspector.latitude,
+        inspector.longitude,
+        siteLat,
+        siteLng,
+      );
+
+      if (distance != null) {
+        score += math.max(0, 30 - distance / 1000);
+        if (priority == 'high' || priority == 'urgent' || priority == 'critical') {
+          score += math.max(0, 20 - distance / 2000);
+        }
+      }
+
+      // Expertise/inspection-type match.
+      if (type.isNotEmpty &&
+          inspector.expertise.any(
+            (skill) => type.contains(skill) || skill.contains(type),
+          )) {
+        score += 25;
+      }
+
+      scored.add(
+        MapEntry(
+          inspector.copyWith(distanceToSite: distance),
+          score,
+        ),
+      );
+    }
+
+    scored.sort((a, b) => b.value.compareTo(a.value));
+    return scored.first.key;
+  }
+
+  static double? _distanceIfPossible(
+    double? lat1,
+    double? lng1,
+    double? lat2,
+    double? lng2,
+  ) {
+    if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) {
+      return null;
+    }
+
+    return Geolocator.distanceBetween(lat1, lng1, lat2, lng2);
+  }
+
+  static double? _toDouble(dynamic value) {
+    if (value == null) return null;
+    return double.tryParse(value.toString());
+  }
+
+  static Future<bool> assignInspection({
+    required String inspectionId,
+    required InspectorInfo inspector,
+    required String authToken,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${AppConfig.apiBaseUrl}/inspections/assign'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $authToken',
+        },
+        body: jsonEncode({
+          'inspectionId': inspectionId,
+          'inspectorId': inspector.id,
+          'inspectorName': inspector.name,
+          'allocationReason': {
+            'workload': inspector.workload,
+            'distanceToSite': inspector.distanceToSite,
+            'expertise': inspector.expertise,
+          },
+        }),
+      );
+
+      return response.statusCode == 200 || response.statusCode == 201;
+    } catch (e) {
+      debugPrint('Assignment API unavailable: $e');
+      // Demo mode only.
+      return authToken.startsWith('mock_') || authToken.startsWith('session_');
+    }
+  }
+}
+
+// ===============================================================
+// AI SERVICE
+// ===============================================================
+
+class AiSummaryService {
+  static Future<AiInspectionResult> analyze({
+    required Map<String, dynamic> inspection,
+    required String authToken,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${AppConfig.apiBaseUrl}/ai/inspection-summary'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $authToken',
+        },
+        body: jsonEncode(inspection),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is Map<String, dynamic>) {
+          final result = AiInspectionResult.fromJson(data);
+          if (result.summary.trim().isNotEmpty ||
+              result.finalStatus.trim().isNotEmpty) {
+            return result;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('AI summary API unavailable: $e');
+    }
+
+    return _localFallback(inspection);
+  }
+
+  static AiInspectionResult _localFallback(
+    Map<String, dynamic> inspection,
+  ) {
+    final checklist = Map<String, dynamic>.from(
+      inspection['checklist'] ?? <String, dynamic>{},
+    );
+
+    final gps = inspection['gpsVerified'] == true;
+    final accuracy =
+        double.tryParse('${inspection['gpsAccuracy'] ?? ''}');
+    final distance =
+        double.tryParse('${inspection['distanceFromSite'] ?? ''}');
+    final evidence =
+        inspection['evidenceStatus']?.toString().toLowerCase() == 'submitted' ||
+            inspection['photoCapturedAt'] != null;
+
+    final helmet = checklist['safetyHelmetPresent'] == true;
+    final fire = checklist['fireExtinguisherValid'] == true;
+    final checklistComplete =
+        checklist['safetyHelmetPresent'] != null &&
+        checklist['fireExtinguisherValid'] != null;
+
+    final problems = (inspection['problemsFound'] ?? '').toString().trim();
+
+    if (!gps || distance == null || distance > AppConfig.siteRadiusMeters) {
+      return const AiInspectionResult(
+        inspectionVerification: 'REQUIRES REVIEW',
+        finalStatus: 'REQUIRES REVIEW',
+        summary: 'GPS/site verification did not satisfy the required criteria.',
+        reason: 'The inspector was not successfully verified within the site radius.',
+        recommendedAction: 'Verify the inspector location and inspection evidence.',
+      );
+    }
+
+    if (accuracy == null || accuracy > AppConfig.maxGpsAccuracyMeters) {
+      return const AiInspectionResult(
+        inspectionVerification: 'REQUIRES REVIEW',
+        finalStatus: 'REQUIRES REVIEW',
+        summary: 'GPS accuracy is insufficient for a reliable verification.',
+        reason: 'The reported GPS accuracy is missing or outside the accepted threshold.',
+        recommendedAction: 'Repeat GPS verification with better location accuracy.',
+      );
+    }
+
+    if (!checklistComplete || !evidence) {
+      return const AiInspectionResult(
+        inspectionVerification: 'INCOMPLETE',
+        finalStatus: 'REQUIRES REVIEW',
+        summary: 'Mandatory inspection information or evidence is missing.',
+        reason: 'The checklist or required evidence was not fully submitted.',
+        recommendedAction: 'Complete the mandatory inspection fields and evidence.',
+      );
+    }
+
+    if (problems.isNotEmpty || !helmet || !fire) {
+      return AiInspectionResult(
+        inspectionVerification: 'PROPERLY INSPECTED',
+        finalStatus: 'NON-COMPLIANT',
+        summary: 'The inspection appears sufficiently documented, but compliance gaps were identified.',
+        reason: problems.isNotEmpty
+            ? 'Problems were reported in the inspection.'
+            : 'One or more mandatory safety checks failed.',
+        recommendedAction: 'Review the reported issues and take corrective action.',
+      );
+    }
+
+    return const AiInspectionResult(
+      inspectionVerification: 'PROPERLY INSPECTED',
+      finalStatus: 'COMPLIANT',
+      summary: 'The inspection appears sufficiently completed and the required checks passed.',
+      reason: 'GPS verification, evidence and mandatory checklist checks were satisfied.',
+      recommendedAction: 'No immediate corrective action indicated by the submitted data.',
+    );
+  }
+}
+
+// ===============================================================
+// LOGIN
+// ===============================================================
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isLoading = false;
+
+  Future<void> _login() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter both email and password.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final response = await http.post(
+        Uri.parse('${AppConfig.apiBaseUrl}/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'email': email,
+          'password': password,
+        }),
+      );
+
+      String authToken = '';
+      String inspectorId = '';
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        authToken = (data['token'] ?? data['access_token'] ?? '').toString();
+        inspectorId =
+            (data['inspectorId'] ?? data['userId'] ?? email).toString();
+
+        if (authToken.isEmpty) {
+          authToken = 'session_token_${email.replaceAll('@', '_')}';
+        }
+      } else {
+        // Local demo mode if backend authentication is not connected.
+        authToken =
+            'mock_jwt_token_${DateTime.now().millisecondsSinceEpoch}';
+        inspectorId = email;
+      }
+
+      await NotificationService.identifyInspector(inspectorId);
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => DashboardScreen(
+            authToken: authToken,
+            inspectorId: inspectorId,
+          ),
+        ),
+      );
+    } catch (e) {
+      // Keep the existing demo/local-login behavior.
+      final inspectorId = email;
+
+      await NotificationService.identifyInspector(inspectorId);
+
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DashboardScreen(
+              authToken: 'session_token_${email.replaceAll('@', '_')}',
+              inspectorId: inspectorId,
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF1F5F9),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const CircleAvatar(
+                    radius: 36,
+                    backgroundColor: Color(0xFFEEF2FF),
+                    child: Icon(
+                      Icons.verified_user,
+                      size: 40,
+                      color: Color(0xFF1E3A8A),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Inspectra Portal',
+                    style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF1E3A8A),
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Inspector Application',
+                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 32),
+                  TextField(
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'Inspector Email',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(
+                        Icons.email,
+                        color: Color(0xFF1E3A8A),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _passwordController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Password',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(
+                        Icons.lock,
+                        color: Color(0xFF1E3A8A),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _login,
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                    child: _isLoading
+                        ? const SizedBox(
+                            height: 20,
+                            width: 20,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Text(
+                            'Login',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ===============================================================
+// DASHBOARD
+// ===============================================================
+
+class DashboardScreen extends StatefulWidget {
+  final String authToken;
+  final String inspectorId;
+
+  const DashboardScreen({
+    super.key,
+    required this.authToken,
+    required this.inspectorId,
+  });
+
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  late Future<List<Map<String, dynamic>>> _assignedSitesFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _assignedSitesFuture = fetchAssignedSites();
+  }
+
+  Future<List<Map<String, dynamic>>> fetchAssignedSites() async {
+    final response = await http.get(
+      Uri.parse('${AppConfig.apiBaseUrl}/inspections/assigned'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ${widget.authToken}',
+      },
+    );
+
+    if (response.statusCode == 200) {
+      final decoded = jsonDecode(response.body);
+
+      if (decoded is List) {
+        return decoded
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      }
+
+      if (decoded is Map && decoded['inspections'] is List) {
+        return (decoded['inspections'] as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      }
+
+      return [];
+    }
+
+    throw Exception(
+      'Failed to load assigned sites. Server response: ${response.statusCode}',
+    );
+  }
+
+  Future<void> _autoAllocate(Map<String, dynamic> site) async {
+    final inspectionId = site['id']?.toString() ??
+        site['inspectionId']?.toString() ??
+        'inspection_${DateTime.now().millisecondsSinceEpoch}';
+
+    final inspector = await WorkAllocationService.selectSuitableInspector(
+      inspection: site,
+      authToken: widget.authToken,
+    );
+
+    if (!mounted) return;
+
+    if (inspector == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No suitable available inspector found.')),
+      );
+      return;
+    }
+
+    final assigned = await WorkAllocationService.assignInspection(
+      inspectionId: inspectionId,
+      inspector: inspector,
+      authToken: widget.authToken,
+    );
+
+    if (!mounted) return;
+
+    if (assigned) {
+      await NotificationService.sendEventToBackend(
+        event: 'inspection_assigned',
+        authToken: widget.authToken,
+        inspectorId: inspector.id,
+        inspectionId: inspectionId,
+        message:
+            'New inspection assigned. Please inspect the assigned site.',
+      );
+
+      final distanceText = inspector.distanceToSite == null
+          ? 'distance unavailable'
+          : '${inspector.distanceToSite!.toStringAsFixed(0)} m from site';
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Automatically assigned to ${inspector.name}. '
+            'Workload: ${inspector.workload}; $distanceText.',
+          ),
+        ),
+      );
+
+      _refreshSites();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Automatic assignment failed.')),
+      );
+    }
+  }
+
+  void _refreshSites() {
+    setState(() {
+      _assignedSitesFuture = fetchAssignedSites();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Assigned Inspections'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refreshSites,
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const LoginScreen(),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: FutureBuilder<List<Map<String, dynamic>>>(
+        future: _assignedSitesFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.error_outline,
+                      color: Colors.redAccent,
+                      size: 48,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      '${snapshot.error}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: _refreshSites,
+                      child: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          final sites = snapshot.data ?? [];
+
+          if (sites.isEmpty) {
+            return const Center(
+              child: Text('No assigned sites found.'),
+            );
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            itemCount: sites.length,
+            itemBuilder: (context, index) {
+              final site = sites[index];
+              final siteId =
+                  site['id']?.toString() ?? site['inspectionId']?.toString() ??
+                      'site_$index';
+              final siteName =
+                  site['siteName'] ?? site['site_name'] ?? 'Unknown Site';
+              final status = site['status'] ?? 'Assigned';
+              final priority =
+                  (site['priority'] ?? site['concern'] ?? 'Normal').toString();
+
+              return Container(
+                margin: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 6,
+                ),
+                child: Card(
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.all(16),
+                    leading: const CircleAvatar(
+                      backgroundColor: Color(0xFFE6FFFB),
+                      child: Icon(
+                        Icons.construction,
+                        color: Color(0xFF0D9488),
+                      ),
+                    ),
+                    title: Text(
+                      siteName.toString(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          _statusChip('Status: $status'),
+                          _statusChip('Priority: $priority'),
+                        ],
+                      ),
+                    ),
+                    trailing: SizedBox(
+                      width: 112,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () => _autoAllocate(site),
+                            icon: const Icon(
+                              Icons.auto_awesome,
+                              size: 16,
+                            ),
+                            label: const Text('Auto'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF0D9488),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                            ),
+                          ),
+                          const Icon(
+                            Icons.arrow_forward_ios,
+                            size: 16,
+                            color: Color(0xFF1E3A8A),
+                          ),
+                        ],
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => InspectionExecutionScreen(
+                            inspectionId: siteId,
+                            siteData: site,
+                            authToken: widget.authToken,
+                            inspectorId: widget.inspectorId,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statusChip(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 4,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade100,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 12,
+          color: Colors.amber.shade900,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+}
+
+// ===============================================================
+// INSPECTION EXECUTION
+// ===============================================================
+
+class InspectionExecutionScreen extends StatefulWidget {
+  final String inspectionId;
+  final Map<String, dynamic> siteData;
+  final String authToken;
+  final String inspectorId;
+
+  const InspectionExecutionScreen({
+    super.key,
+    required this.inspectionId,
+    required this.siteData,
+    required this.authToken,
+    required this.inspectorId,
+  });
+
+  @override
+  State<InspectionExecutionScreen> createState() =>
+      _InspectionExecutionScreenState();
+}
+
+class _InspectionExecutionScreenState
+    extends State<InspectionExecutionScreen> {
+  Position? _currentPosition;
+  File? _capturedImage;
+  DateTime? _photoCapturedAt;
+
+  bool _isGpsVerified = false;
+  double? _distanceFromSite;
+  String? _gpsMessage;
+
+  bool _isSafetyHelmetChecked = false;
+  bool _isFireExtinguisherChecked = false;
+
+  // This remains an interface for your teammate's file-transfer/storage work.
+  // Capturing a local image does NOT mean the file has been uploaded.
+  String _evidenceStatus = 'missing';
+
+  final TextEditingController _problemsController =
+      TextEditingController();
+  final TextEditingController _remarksController =
+      TextEditingController();
+
+  bool _isSubmitting = false;
+  bool _isGeneratingSummary = false;
+
+  AiInspectionResult? _aiResult;
+
+  double? get _siteLatitude => _toDouble(
+        widget.siteData['latitude'] ??
+            widget.siteData['siteLatitude'] ??
+            widget.siteData['site_latitude'],
+      );
+
+  double? get _siteLongitude => _toDouble(
+        widget.siteData['longitude'] ??
+            widget.siteData['siteLongitude'] ??
+            widget.siteData['site_longitude'],
+      );
+
+  String get _siteName =>
+      (widget.siteData['siteName'] ??
+              widget.siteData['site_name'] ??
+              'Inspection')
+          .toString();
+
+  @override
+  void dispose() {
+    _problemsController.dispose();
+    _remarksController.dispose();
+    super.dispose();
+  }
+
+  double? _toDouble(dynamic value) {
+    if (value == null) return null;
+    return double.tryParse(value.toString());
+  }
+
+  Future<void> _verifyGps() async {
+    setState(() {
+      _gpsMessage = 'Checking GPS location...';
+      _isGpsVerified = false;
+    });
+
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        setState(() {
+          _gpsMessage = 'Location services are disabled. Turn on GPS and retry.';
+        });
+        await NotificationService.sendEventToBackend(
+          event: 'gps_verification_failed',
+          authToken: widget.authToken,
+          inspectorId: widget.inspectorId,
+          inspectionId: widget.inspectionId,
+          message: 'Location services are disabled.',
+        );
+        return;
+      }
+
+      var permission = await Geolocator.checkPermission();
+
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
+      if (permission == LocationPermission.denied) {
+        setState(() {
+          _gpsMessage = 'Location permission was denied.';
+        });
+        return;
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        setState(() {
+          _gpsMessage =
+              'Location permission is permanently denied. Enable it in phone settings.';
+        });
+        return;
+      }
+
+      if (_siteLatitude == null || _siteLongitude == null) {
+        setState(() {
+          _gpsMessage =
+              'This inspection does not contain valid site latitude/longitude.';
+        });
+        return;
+      }
+
+      final pos= await Geolocator.getCurrentPosition(
+  desiredAccuracy: LocationAccuracy.high,
+);
+
+      if (!mounted) return;
+
+      // IMPORTANT FIX:
+      // Save the actual GPS Position so latitude/longitude/accuracy used
+      // during submission are the same values that were verified.
+      _currentPosition = pos;
+
+      final distance = Geolocator.distanceBetween(
+        pos.latitude,
+        pos.longitude,
+        _siteLatitude!,
+        _siteLongitude!,
+      );
+
+      _distanceFromSite = distance;
+
+      final accuracyAcceptable =
+          pos.accuracy > 0 &&
+          pos.accuracy <= AppConfig.maxGpsAccuracyMeters;
+
+      if (!accuracyAcceptable) {
+        setState(() {
+          _isGpsVerified = false;
+          _gpsMessage =
+              'GPS accuracy is ${pos.accuracy.toStringAsFixed(1)} m. '
+              'Accuracy must be ${AppConfig.maxGpsAccuracyMeters.toStringAsFixed(0)} m or better.';
+        });
+
+        await NotificationService.sendEventToBackend(
+          event: 'gps_accuracy_problem',
+          authToken: widget.authToken,
+          inspectorId: widget.inspectorId,
+          inspectionId: widget.inspectionId,
+          message:
+              'GPS accuracy is insufficient: ${pos.accuracy.toStringAsFixed(1)} m.',
+        );
+        return;
+      }
+
+      if (distance <= AppConfig.siteRadiusMeters) {
+        setState(() {
+          _isGpsVerified = true;
+          _gpsMessage =
+              'GPS verified. Inspector is within ${AppConfig.siteRadiusMeters.toStringAsFixed(0)} m of the site.';
+        });
+      } else {
+        setState(() {
+          _isGpsVerified = false;
+          _gpsMessage =
+              'You are ${distance.toStringAsFixed(0)} m from the site. '
+              'Move within ${AppConfig.siteRadiusMeters.toStringAsFixed(0)} m.';
+        });
+
+        await NotificationService.sendEventToBackend(
+          event: 'gps_verification_failed',
+          authToken: widget.authToken,
+          inspectorId: widget.inspectorId,
+          inspectionId: widget.inspectionId,
+          message:
+              'Inspector is ${distance.toStringAsFixed(0)} m away from the registered site.',
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _isGpsVerified = false;
+        _gpsMessage = 'Unable to obtain GPS location. Please try again.';
+      });
+
+      await NotificationService.sendEventToBackend(
+        event: 'gps_verification_failed',
+        authToken: widget.authToken,
+        inspectorId: widget.inspectorId,
+        inspectionId: widget.inspectionId,
+        message: 'GPS verification error: $e',
+      );
+    }
+  }
+
+  Future<void> _capturePhoto() async {
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 85,
+      );
+
+      if (pickedFile == null) return;
+
+      setState(() {
+        _capturedImage = File(pickedFile.path);
+        _photoCapturedAt = DateTime.now();
+        // Local capture exists, but upload is still the teammate's job.
+        _evidenceStatus = 'captured_locally';
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Photo captured locally. File transfer/storage is handled by the assigned module.',
+          ),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Camera error: $e')),
+      );
+    }
+  }
+
+  Future<void> _generateAiSummary() async {
+    if (!_validateInspection(showMessage: true, forAi: true)) return;
+
+    setState(() {
+      _isGeneratingSummary = true;
+      _aiResult = null;
+    });
+
+    final payload = _buildInspectionPayload(
+      includeAiResult: false,
+    );
+
+    final result = await AiSummaryService.analyze(
+      inspection: payload,
+      authToken: widget.authToken,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _aiResult = result;
+      _isGeneratingSummary = false;
+    });
+
+    if (result.inspectionVerification == 'REQUIRES REVIEW' ||
+        result.inspectionVerification == 'INCOMPLETE') {
+      await NotificationService.sendEventToBackend(
+        event: 'inspection_requires_review',
+        authToken: widget.authToken,
+        inspectorId: widget.inspectorId,
+        inspectionId: widget.inspectionId,
+        message: 'Inspection has been flagged for review.',
+      );
+    }
+  }
+
+  bool _validateInspection({
+    required bool showMessage,
+    bool forAi = false,
+  }) {
+    String? error;
+
+    if (!_isGpsVerified) {
+      error = 'GPS verification is required.';
+    } else if (_distanceFromSite == null ||
+        _distanceFromSite! > AppConfig.siteRadiusMeters) {
+      error = 'Inspector must be within 100 metres of the site.';
+    } else if (_currentPosition == null) {
+      error = 'Current GPS position is missing. Verify GPS again.';
+    } else if (_currentPosition!.accuracy >
+        AppConfig.maxGpsAccuracyMeters) {
+      error = 'GPS accuracy is insufficient.';
+    } else if (!_isSafetyHelmetChecked) {
+      error = 'Safety helmet checklist item is not passed.';
+    } else if (!_isFireExtinguisherChecked) {
+      error = 'Fire extinguisher checklist item is not passed.';
+    } else if (_evidenceStatus != 'submitted' && !forAi) {
+      error =
+          'Required evidence has not been marked as submitted. Complete the file-transfer module first.';
+    } else if (_evidenceStatus == 'missing') {
+      error = 'Required evidence is missing.';
+    }
+
+    if (error != null && showMessage && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error)),
+      );
+    }
+
+    return error == null;
+  }
+
+  Map<String, dynamic> _buildInspectionPayload({
+    required bool includeAiResult,
+  }) {
+    return {
+      'inspectionId': widget.inspectionId,
+      'inspectorId': widget.inspectorId,
+      'inspectorName': widget.siteData['inspectorName'],
+      'siteName': _siteName,
+      'siteLatitude': _siteLatitude,
+      'siteLongitude': _siteLongitude,
+      'inspectorLatitude': _currentPosition?.latitude,
+      'inspectorLongitude': _currentPosition?.longitude,
+      'gpsAccuracy': _currentPosition?.accuracy,
+      'distanceFromSite': _distanceFromSite,
+      'gpsVerified': _isGpsVerified,
+      'inspectionTimestamp': DateTime.now().toIso8601String(),
+      'photoCapturedAt': _photoCapturedAt?.toIso8601String(),
+      'evidenceStatus': _evidenceStatus,
+      'checklist': {
+        'safetyHelmetPresent': _isSafetyHelmetChecked,
+        'fireExtinguisherValid': _isFireExtinguisherChecked,
+        'inspectionPassed':
+            _isSafetyHelmetChecked && _isFireExtinguisherChecked,
+      },
+      'problemsFound': _problemsController.text.trim(),
+      'remarks': _remarksController.text.trim(),
+      if (includeAiResult && _aiResult != null)
+        'aiAnalysis': _aiResult!.toJson(),
+    };
+  }
+
+  Future<void> _submitInspection() async {
+    // The actual file transfer is teammate-owned. Therefore this screen
+    // requires the evidence integration to report "submitted".
+    if (!_validateInspection(showMessage: true)) return;
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      // Generate AI result automatically if the inspector has not already
+      // generated it.
+      if (_aiResult == null) {
+        final result = await AiSummaryService.analyze(
+          inspection: _buildInspectionPayload(includeAiResult: false),
+          authToken: widget.authToken,
+        );
+
+        if (!mounted) return;
+        setState(() => _aiResult = result);
+      }
+
+      final payload = _buildInspectionPayload(includeAiResult: true);
+
+      final response = await http.post(
+        Uri.parse('${AppConfig.apiBaseUrl}/process-inspection'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${widget.authToken}',
+        },
+        body: jsonEncode(payload),
+      );
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final finalStatus =
+            _aiResult?.finalStatus.toUpperCase() ?? 'REQUIRES REVIEW';
+
+        await NotificationService.sendEventToBackend(
+          event: 'inspection_final_result',
+          authToken: widget.authToken,
+          inspectorId: widget.inspectorId,
+          inspectionId: widget.inspectionId,
+          message: 'Inspection completed. Final result: $finalStatus.',
+        );
+
+        Navigator.pop(context, true);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Inspection submitted successfully. Result: $finalStatus',
+            ),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Server Error: ${response.statusCode}',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Submission Error: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  void _showEvidenceIntegrationInfo() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Evidence Status'),
+        content: const Text(
+          'Actual photo/file transfer and storage are handled by your teammate. '
+          'This screen only exposes the evidence status needed by the inspection logic.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ai = _aiResult;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_siteName),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // -------------------------------------------------------
+            // GPS
+            // -------------------------------------------------------
+            const Text(
+              'GPS Site Verification',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E3A8A),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          _isGpsVerified
+                              ? Icons.check_circle
+                              : Icons.location_off,
+                          color: _isGpsVerified
+                              ? const Color(0xFF0D9488)
+                              : Colors.redAccent,
+                          size: 32,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _isGpsVerified
+                                ? 'GPS Location Verified'
+                                : 'GPS Verification Required',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _infoRow(
+                      'Site latitude',
+                      _siteLatitude?.toStringAsFixed(6) ?? 'Unavailable',
+                    ),
+                    _infoRow(
+                      'Site longitude',
+                      _siteLongitude?.toStringAsFixed(6) ?? 'Unavailable',
+                    ),
+                    _infoRow(
+                      'Inspector latitude',
+                      _currentPosition?.latitude.toStringAsFixed(6) ??
+                          'Not checked',
+                    ),
+                    _infoRow(
+                      'Inspector longitude',
+                      _currentPosition?.longitude.toStringAsFixed(6) ??
+                          'Not checked',
+                    ),
+                    _infoRow(
+                      'GPS accuracy',
+                      _currentPosition == null
+                          ? 'Not checked'
+                          : '${_currentPosition!.accuracy.toStringAsFixed(1)} m',
+                    ),
+                    _infoRow(
+                      'Distance from site',
+                      _distanceFromSite == null
+                          ? 'Not checked'
+                          : '${_distanceFromSite!.toStringAsFixed(1)} m',
+                    ),
+                    _infoRow(
+                      'Verification radius',
+                      '${AppConfig.siteRadiusMeters.toStringAsFixed(0)} m',
+                    ),
+                    if (_gpsMessage != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        _gpsMessage!,
+                        style: TextStyle(
+                          color: _isGpsVerified
+                              ? const Color(0xFF0D9488)
+                              : Colors.redAccent,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _verifyGps,
+                        icon: const Icon(Icons.my_location),
+                        label: Text(
+                          _isGpsVerified ? 'Re-check GPS' : 'Verify GPS',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            // -------------------------------------------------------
+            // CHECKLIST
+            // -------------------------------------------------------
+            const Text(
+              'Compliance Checklist',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E3A8A),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Column(
+                children: [
+                  CheckboxListTile(
+                    activeColor: const Color(0xFF0D9488),
+                    title: const Text(
+                      'Safety Helmets Worn by Personnel',
+                    ),
+                    value: _isSafetyHelmetChecked,
+                    onChanged: (value) {
+                      setState(() {
+                        _isSafetyHelmetChecked = value ?? false;
+                      });
+                    },
+                  ),
+                  const Divider(height: 1),
+                  CheckboxListTile(
+                    activeColor: const Color(0xFF0D9488),
+                    title: const Text(
+                      'Fire Extinguishers Accessible & Valid',
+                    ),
+                    value: _isFireExtinguisherChecked,
+                    onChanged: (value) {
+                      setState(() {
+                        _isFireExtinguisherChecked = value ?? false;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            // -------------------------------------------------------
+            // PROBLEMS / REMARKS
+            // -------------------------------------------------------
+            const Text(
+              'Inspection Findings',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E3A8A),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: _problemsController,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Problems Found',
+                        hintText: 'Describe any non-compliance or problems.',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _remarksController,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Remarks',
+                        hintText: 'Add inspection remarks.',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            // -------------------------------------------------------
+            // EVIDENCE
+            // -------------------------------------------------------
+            const Text(
+              'Evidence',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E3A8A),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  children: [
+                    Container(
+                      height: 190,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        color: const Color(0xFFF8FAFC),
+                      ),
+                      child: _capturedImage != null
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.file(
+                                _capturedImage!,
+                                fit: BoxFit.cover,
+                              ),
+                            )
+                          : Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.camera_alt,
+                                      size: 48,
+                                      color: Color(0xFF1E3A8A),
+                                    ),
+                                    onPressed: _capturePhoto,
+                                  ),
+                                  const Text(
+                                    'Capture inspection evidence',
+                                    style: TextStyle(color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                            ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        const Icon(Icons.info_outline, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Evidence status: ${_evidenceStatus.toUpperCase()}',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _showEvidenceIntegrationInfo,
+                          child: const Text('Info'),
+                        ),
+                      ],
+                    ),
+                    if (_photoCapturedAt != null)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Captured: ${_photoCapturedAt!.toLocal()}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Your teammate\'s file-transfer module should update this '
+                      'status to "submitted" after successful upload.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            // -------------------------------------------------------
+            // AI
+            // -------------------------------------------------------
+            const Text(
+              'AI Inspection Verification & Final Conclusion',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E3A8A),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (ai == null)
+                      const Text(
+                        'AI will evaluate GPS verification, evidence status, '
+                        'checklist completion, problems and remarks.',
+                      )
+                    else ...[
+                      _resultBadge(
+                        'Inspection verification',
+                        ai.inspectionVerification,
+                      ),
+                      const SizedBox(height: 8),
+                      _resultBadge('Final status', ai.finalStatus),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Summary',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(ai.summary),
+                      if (ai.reason.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        const Text(
+                          'Reason',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(ai.reason),
+                      ],
+                      if (ai.recommendedAction.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        const Text(
+                          'Recommended action',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(ai.recommendedAction),
+                      ],
+                    ],
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed:
+                            _isGeneratingSummary ? null : _generateAiSummary,
+                        icon: _isGeneratingSummary
+                            ? const SizedBox(
+                                height: 18,
+                                width: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.auto_awesome),
+                        label: Text(
+                          _isGeneratingSummary
+                              ? 'Analyzing...'
+                              : 'Generate AI Conclusion',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // -------------------------------------------------------
+            // SUBMIT
+            // -------------------------------------------------------
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: ElevatedButton.icon(
+                onPressed: _isSubmitting ? null : _submitInspection,
+                icon: _isSubmitting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.send),
+                label: Text(
+                  _isSubmitting
+                      ? 'Submitting...'
+                      : 'Submit Inspection',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 145,
+            child: Text(
+              '$label:',
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(child: Text(value)),
+        ],
+      ),
+    );
+  }
+
+  Widget _resultBadge(String label, String value) {
+    final upper = value.toUpperCase();
+
+    final isGood =
+        upper.contains('COMPLIANT') ||
+        upper.contains('PROPERLY INSPECTED');
+
+    final isBad =
+        upper.contains('NON-COMPLIANT') ||
+        upper.contains('INCOMPLETE') ||
+        upper.contains('REQUIRES REVIEW');
+
+    final color = isGood
+        ? const Color(0xFF0D9488)
+        : isBad
+            ? Colors.deepOrange
+            : Colors.blueGrey;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.30)),
+      ),
+      child: RichText(
+        text: TextSpan(
+          style: const TextStyle(color: Colors.black87),
+          children: [
+            TextSpan(
+              text: '$label: ',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            TextSpan(
+              text: value,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ===============================================================
+// APP
+// ===============================================================
+
+class InspectraApp extends StatelessWidget {
+  const InspectraApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Inspectra Mobile',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF1E3A8A),
+          primary: const Color(0xFF1E3A8A),
+          secondary: const Color(0xFF0D9488),
+          surface: const Color(0xFFF8FAFC),
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF1F5F9),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFF1E3A8A),
+          foregroundColor: Colors.white,
+          elevation: 2,
+          centerTitle: true,
+        ),
+        cardTheme: CardThemeData(
+          color: Colors.white,
+          elevation: 3,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF1E3A8A),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+      ),
+      home: const LoginScreen(),
+    );
+  }
+}
